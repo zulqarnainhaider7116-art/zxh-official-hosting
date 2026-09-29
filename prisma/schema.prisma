@@ -1,0 +1,320 @@
+// Reference Prisma schema for DeployForge.
+// The running app uses Supabase (Postgres) through server-side API routes; this file
+// documents the same data model for teams that prefer Prisma migrations/tooling.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserStatus { active suspended }
+enum AdminRoleKind { owner admin support }
+enum ProjectStatus { draft ready deploying live failed }
+enum DeploymentStatus { queued preparing uploading building checking completed failed cancelled }
+enum LogLevel { info warn error success system }
+enum DomainType { generated custom }
+enum DomainStatus { active pending_attach pending_verification misconfigured error }
+enum ConnectionStatus { connected invalid error }
+enum SubscriptionStatus { active expired cancelled replaced }
+enum PaymentStatus { pending approved rejected correction_requested }
+
+// Sessions are issued and hashed by Supabase Auth (auth.sessions); Profile.id == auth.users.id.
+model User {
+  id                   String   @id @db.Uuid
+  email                String?
+  fullName             String   @default("") @map("full_name")
+  phone                String   @default("")
+  status               UserStatus @default(active)
+  suspendedReason      String?  @map("suspended_reason")
+  planId               Int?     @map("plan_id")
+  planExpiresAt        DateTime? @map("plan_expires_at")
+  projectLimitOverride Int?     @map("project_limit_override")
+  lastSeenAt           DateTime? @map("last_seen_at")
+  createdAt            DateTime @default(now()) @map("created_at")
+  updatedAt            DateTime @default(now()) @updatedAt @map("updated_at")
+  plan                 Plan?    @relation(fields: [planId], references: [id], onDelete: SetNull)
+  adminRole            AdminRole?
+  projects             Project[]
+  connections          VercelConnection[]
+  deployments          Deployment[]
+  domains              Domain[]
+  envVars              EnvironmentVariable[]
+  subscriptions        Subscription[]
+  paymentRequests      PaymentRequest[]
+  notifications        Notification[]
+  @@map("profiles")
+}
+
+model AdminRole {
+  id        Int           @id @default(autoincrement())
+  userId    String        @unique @map("user_id") @db.Uuid
+  role      AdminRoleKind @default(admin)
+  grantedBy String?       @map("granted_by") @db.Uuid
+  createdAt DateTime      @default(now()) @map("created_at")
+  user      User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  @@map("admin_roles")
+}
+
+model Plan {
+  id           Int      @id @default(autoincrement())
+  slug         String   @unique
+  name         String
+  price        Decimal  @default(0)
+  currency     String   @default("PKR") @db.VarChar(5)
+  projectLimit Int      @default(5) @map("project_limit")
+  durationDays Int      @default(30) @map("duration_days")
+  features     Json     @default("[]")
+  isActive     Boolean  @default(true) @map("is_active")
+  isDefault    Boolean  @default(false) @map("is_default")
+  sortOrder    Int      @default(0) @map("sort_order")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @default(now()) @updatedAt @map("updated_at")
+  users        User[]
+  subscriptions Subscription[]
+  payments     PaymentRequest[]
+  @@map("plans")
+}
+
+model VercelConnection {
+  id             String   @id @default(uuid()) @db.Uuid
+  userId         String   @map("user_id") @db.Uuid
+  name           String
+  tokenEncrypted String   @map("token_encrypted") // AES-256-GCM, never returned to clients
+  tokenLast4     String?  @map("token_last4") @db.VarChar(4)
+  teamId         String?  @map("team_id")
+  teamName       String?  @map("team_name")
+  vercelUsername String?  @map("vercel_username")
+  vercelEmail    String?  @map("vercel_email")
+  status         ConnectionStatus @default(connected)
+  lastError      String?  @map("last_error")
+  lastCheckedAt  DateTime? @map("last_checked_at")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @default(now()) @updatedAt @map("updated_at")
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  projects       Project[]
+  @@index([userId])
+  @@map("vercel_connections")
+}
+
+model Project {
+  id                String   @id @default(uuid()) @db.Uuid
+  userId            String   @map("user_id") @db.Uuid
+  connectionId      String?  @map("connection_id") @db.Uuid
+  name              String
+  slug              String   @unique
+  framework         String?  @default("static")
+  buildCommand      String?  @map("build_command")
+  installCommand    String?  @map("install_command")
+  outputDirectory   String?  @map("output_directory")
+  rootDirectory     String?  @map("root_directory")
+  nodeVersion       String?  @map("node_version")
+  packageManager    String?  @default("npm") @map("package_manager")
+  sourcePath        String?  @map("source_path")
+  sourceFilename    String?  @map("source_filename")
+  sourceSize        BigInt   @default(0) @map("source_size")
+  fileCount         Int      @default(0) @map("file_count")
+  manifest          Json     @default("[]")
+  analysis          Json     @default("{}")
+  vercelProjectId   String?  @map("vercel_project_id")
+  vercelProjectName String?  @map("vercel_project_name")
+  productionUrl     String?  @map("production_url")
+  status            ProjectStatus @default(draft)
+  lastDeployedAt    DateTime? @map("last_deployed_at")
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @default(now()) @updatedAt @map("updated_at")
+  user              User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  connection        VercelConnection? @relation(fields: [connectionId], references: [id], onDelete: SetNull)
+  deployments       Deployment[]
+  domains           Domain[]
+  envVars           EnvironmentVariable[]
+  @@index([userId, updatedAt])
+  @@map("projects")
+}
+
+model Deployment {
+  id                 String   @id @default(uuid()) @db.Uuid
+  projectId          String   @map("project_id") @db.Uuid
+  userId             String   @map("user_id") @db.Uuid
+  connectionId       String?  @map("connection_id") @db.Uuid
+  status             DeploymentStatus @default(queued)
+  progress           Int      @default(0)
+  vercelDeploymentId String?  @map("vercel_deployment_id")
+  url                String?
+  inspectorUrl       String?  @map("inspector_url")
+  sourceLabel        String?  @map("source_label")
+  target             String   @default("production")
+  attempt            Int      @default(1)
+  retryCount         Int      @default(0) @map("retry_count")
+  filesTotal         Int      @default(0) @map("files_total")
+  filesUploaded      Int      @default(0) @map("files_uploaded")
+  errorCode          String?  @map("error_code")
+  errorMessage       String?  @map("error_message")
+  errorHint          String?  @map("error_hint")
+  cancelRequested    Boolean  @default(false) @map("cancel_requested")
+  lastEventTs        BigInt   @default(0) @map("last_event_ts")
+  lockUntil          DateTime? @map("lock_until")
+  startedAt          DateTime? @map("started_at")
+  buildingAt         DateTime? @map("building_at")
+  readyAt            DateTime? @map("ready_at")
+  finishedAt         DateTime? @map("finished_at")
+  durationMs         BigInt?  @map("duration_ms")
+  createdAt          DateTime @default(now()) @map("created_at")
+  updatedAt          DateTime @default(now()) @updatedAt @map("updated_at")
+  project            Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user               User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  logs               DeploymentLog[]
+  @@index([userId, createdAt])
+  @@index([projectId, createdAt])
+  @@index([status])
+  @@map("deployments")
+}
+
+model DeploymentLog {
+  id           BigInt   @id @default(autoincrement())
+  deploymentId String   @map("deployment_id") @db.Uuid
+  ts           DateTime @default(now())
+  level        LogLevel @default(info)
+  phase        String?
+  message      String?
+  createdAt    DateTime @default(now()) @map("created_at")
+  deployment   Deployment @relation(fields: [deploymentId], references: [id], onDelete: Cascade)
+  @@index([deploymentId, id])
+  @@map("deployment_logs")
+}
+
+model Domain {
+  id            String   @id @default(uuid()) @db.Uuid
+  projectId     String   @map("project_id") @db.Uuid
+  userId        String   @map("user_id") @db.Uuid
+  hostname      String   @unique
+  type          DomainType @default(custom)
+  status        DomainStatus @default(pending_attach)
+  verified      Boolean  @default(false)
+  verification  Json     @default("[]")
+  dnsRecords    Json     @default("[]") @map("dns_records")
+  lastError     String?  @map("last_error")
+  lastCheckedAt DateTime? @map("last_checked_at")
+  createdAt     DateTime @default(now()) @map("created_at")
+  project       Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  @@index([projectId])
+  @@map("domains")
+}
+
+model EnvironmentVariable {
+  id             String   @id @default(uuid()) @db.Uuid
+  projectId      String   @map("project_id") @db.Uuid
+  userId         String   @map("user_id") @db.Uuid
+  key            String
+  valueEncrypted String   @map("value_encrypted") // AES-256-GCM
+  isSecret       Boolean  @default(true) @map("is_secret")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @default(now()) @updatedAt @map("updated_at")
+  project        Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  @@unique([projectId, key])
+  @@map("environment_variables")
+}
+
+model Subscription {
+  id               String   @id @default(uuid()) @db.Uuid
+  userId           String   @map("user_id") @db.Uuid
+  planId           Int?     @map("plan_id")
+  status           SubscriptionStatus @default(active)
+  startsAt         DateTime @default(now()) @map("starts_at")
+  endsAt           DateTime? @map("ends_at")
+  cancelledAt      DateTime? @map("cancelled_at")
+  paymentRequestId String?  @map("payment_request_id") @db.Uuid
+  projectLimit     Int?     @map("project_limit")
+  amount           Decimal?
+  currency         String?  @db.VarChar(5)
+  approvedBy       String?  @map("approved_by") @db.Uuid
+  createdAt        DateTime @default(now()) @map("created_at")
+  user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  plan             Plan?    @relation(fields: [planId], references: [id], onDelete: SetNull)
+  @@index([userId, status])
+  @@map("subscriptions")
+}
+
+model PaymentRequest {
+  id            String   @id @default(uuid()) @db.Uuid
+  userId        String   @map("user_id") @db.Uuid
+  planId        Int?     @map("plan_id")
+  amount        Decimal?
+  currency      String?  @db.VarChar(5)
+  methodName    String?  @map("method_name")
+  fullName      String?  @map("full_name")
+  phone         String?
+  accountHolder String?  @map("account_holder")
+  referenceId   String?  @map("reference_id")
+  proofPath     String?  @map("proof_path")
+  status        PaymentStatus @default(pending)
+  adminNote     String?  @map("admin_note")
+  reviewedBy    String?  @map("reviewed_by") @db.Uuid
+  reviewedAt    DateTime? @map("reviewed_at")
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @default(now()) @updatedAt @map("updated_at")
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  plan          Plan?    @relation(fields: [planId], references: [id], onDelete: SetNull)
+  @@index([status, createdAt])
+  @@map("payment_requests")
+}
+
+model Notification {
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  type      String?
+  title     String
+  body      String?
+  link      String?
+  readAt    DateTime? @map("read_at")
+  createdAt DateTime @default(now()) @map("created_at")
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  @@index([userId, createdAt])
+  @@map("notifications")
+}
+
+model AuditLog {
+  id         BigInt   @id @default(autoincrement())
+  actorId    String?  @map("actor_id") @db.Uuid
+  actorEmail String?  @map("actor_email")
+  action     String
+  targetType String?  @map("target_type")
+  targetId   String?  @map("target_id")
+  metadata   Json     @default("{}")
+  ip         String?
+  userAgent  String?  @map("user_agent")
+  createdAt  DateTime @default(now()) @map("created_at")
+  @@index([actorId, createdAt])
+  @@index([targetId])
+  @@map("audit_logs")
+}
+
+model SystemSetting {
+  key       String   @id
+  value     Json     @default("{}")
+  updatedAt DateTime @default(now()) @map("updated_at")
+  @@map("system_settings")
+}
+
+model Announcement {
+  id        Int      @id @default(autoincrement())
+  title     String
+  body      String?
+  level     String   @default("info")
+  isActive  Boolean  @default(true) @map("is_active")
+  createdBy String?  @map("created_by") @db.Uuid
+  createdAt DateTime @default(now()) @map("created_at")
+  @@map("announcements")
+}
+
+model RateLimit {
+  key         String   @id
+  count       Int      @default(0)
+  windowStart DateTime @default(now()) @map("window_start")
+  @@map("rate_limits")
+}
